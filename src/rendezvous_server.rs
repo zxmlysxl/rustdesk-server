@@ -58,7 +58,7 @@ type Sender = mpsc::UnboundedSender<Data>;
 type Receiver = mpsc::UnboundedReceiver<Data>;
 static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
-static CHECK_RELAY_TIMEOUT: u64 = 3_000;
+const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
@@ -1106,13 +1106,29 @@ impl RendezvousServer {
     async fn handle_listener_inner(
         &mut self,
         stream: TcpStream,
-        addr: SocketAddr,
+        mut addr: SocketAddr,
         key: &str,
         ws: bool,
     ) -> ResultType<()> {
         let mut sink;
         if ws {
-            let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+            use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+            let callback = |req: &Request, response: Response| {
+                let headers = req.headers();
+                let real_ip = headers
+                    .get("X-Real-IP")
+                    .or_else(|| headers.get("X-Forwarded-For"))
+                    .and_then(|header_value| header_value.to_str().ok());
+                if let Some(ip) = real_ip {
+                    if ip.contains('.') {
+                        addr = format!("{ip}:0").parse().unwrap_or(addr);
+                    } else {
+                        addr = format!("[{ip}]:0").parse().unwrap_or(addr);
+                    }
+                }
+                Ok(response)
+            };
+            let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
             let (a, mut b) = ws_stream.split();
             sink = Some(Sink::Ws(a));
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
